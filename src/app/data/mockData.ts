@@ -184,6 +184,13 @@ const mockTranscriptions = [
   "Vanuit mijn positie kon ik zien dat de gele sedan probeerde in te halen maar werd afgesneden door de bruine SUV. De motorrijder probeerde uit te wijken maar raakte de vangrail. De fietser was op de vluchtstrook aan het fietsen.",
 ];
 
+const mockSummaries = [
+  "Getuigenverslag van een bestuurder die een kettingbotsing op A12 beschrijft.",
+  "Getuige ziet een SUV achteroprijden en voertuigen uitwijken na een botsing.",
+  "Medewerker bij afrit beschrijft vier voertuigen betrokken bij een ongeluk op nat wegdek.",
+  "Getuige ziet een inhaalmanoeuvre mislukken waarbij een motor en fiets betrokken zijn.",
+];
+
 function generateMockAudio(): AudioData[] {
   const audio: AudioData[] = [];
 
@@ -197,6 +204,7 @@ function generateMockAudio(): AudioData[] {
     const status: TranscriptionStatus = isFailed ? 'failed' : (isCompleted ? 'completed' : (r(4) > 0.5 ? 'processing' : 'pending'));
 
     const transcription = isCompleted ? mockTranscriptions[i % mockTranscriptions.length] : undefined;
+    const transcriptionSummary = isCompleted ? mockSummaries[i % mockSummaries.length] : undefined;
 
     audio.push({
       id: `audio-${String(i + 1).padStart(3, '0')}`,
@@ -205,6 +213,7 @@ function generateMockAudio(): AudioData[] {
       uploadedAt: `2026-02-${String(Math.floor(r(5) * 28) + 1).padStart(2, '0')}T${String(Math.floor(r(6) * 24)).padStart(2, '0')}:${String(Math.floor(r(7) * 60)).padStart(2, '0')}:00Z`,
       duration,
       transcription,
+      transcriptionSummary,
       transcriptionStatus: status,
       reviewedBy: isCompleted ? `onderzoeker_0${Math.floor(r(8) * 3) + 1}` : undefined,
       reviewedAt: isCompleted ? `2026-03-01T${String(Math.floor(r(9) * 24)).padStart(2, '0')}:30:00Z` : undefined,

@@ -27,6 +27,7 @@ export function Transcription() {
   const [isSpeechRecognitionAvailable, setIsSpeechRecognitionAvailable] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [liveTranscription, setLiveTranscription] = useState("");
+  const [transcriptMode, setTranscriptMode] = useState<'both' | 'description' | 'full'>('both');
   const [currentTranscribingId, setCurrentTranscribingId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const recognitionRef = useRef<any>(null);
@@ -218,7 +219,9 @@ export function Transcription() {
   };
 
   const saveLiveTranscription = () => {
-    if (!liveTranscription.trim()) {
+    const transcript = liveTranscriptRef.current || liveTranscription;
+
+    if (!transcript.trim()) {
       addError("Geen transcriptie om op te slaan.");
       return;
     }
@@ -228,13 +231,15 @@ export function Transcription() {
       filename: `Live opname ${new Date().toLocaleString('nl-NL')}`,
       uploadedAt: new Date().toISOString(),
       transcriptionStatus: 'completed',
-      transcription: liveTranscription,
+      transcription: transcript,
+      transcriptionSummary: `Live opname transcriptie van ${new Date().toLocaleString('nl-NL')}`,
       reviewedAt: new Date().toISOString(),
       reviewedBy: 'current_user',
     };
 
     setAudioFiles(prev => [newAudio, ...prev]);
     setLiveTranscription("");
+    liveTranscriptRef.current = "";
     addSuccess("Live transcriptie opgeslagen als nieuw audio bestand.");
   };
 
@@ -371,15 +376,16 @@ export function Transcription() {
 
     try {
       console.log('Calling transcribeAudioFile for:', audio.filename);
-      const transcription = await transcribeAudioFile(audio);
-      console.log('Transcription completed:', transcription.substring(0, 50) + '...');
+      const { summary, full } = await transcribeAudioFile(audio);
+      console.log('Transcription completed:', full.substring(0, 50) + '...');
 
       setAudioFiles(prev => prev.map(audio =>
         audio.id === id
           ? {
               ...audio,
               transcriptionStatus: 'completed' as TranscriptionStatus,
-              transcription: transcription,
+              transcriptionSummary: summary,
+              transcription: full,
               reviewedAt: new Date().toISOString(),
               reviewedBy: 'current_user'
             }
@@ -422,15 +428,16 @@ export function Transcription() {
 
     try {
       console.log('Calling transcribeAudioFile for:', audio.filename);
-      const transcription = await transcribeAudioFile(audio);
-      console.log('Transcription completed:', transcription.substring(0, 50) + '...');
+      const { summary, full } = await transcribeAudioFile(audio);
+      console.log('Transcription completed:', full.substring(0, 50) + '...');
 
       setAudioFiles(prev => prev.map(a =>
         a.id === audio.id
           ? {
               ...a,
               transcriptionStatus: 'completed' as TranscriptionStatus,
-              transcription: transcription,
+              transcriptionSummary: summary,
+              transcription: full,
               reviewedAt: new Date().toISOString(),
               reviewedBy: 'current_user'
             }
@@ -545,7 +552,7 @@ export function Transcription() {
     }, 3000);
   };
 
-  const transcribeAudioFile = async (audioData: AudioData): Promise<string> => {
+  const transcribeAudioFile = async (audioData: AudioData): Promise<{ summary: string; full: string }> => {
     console.log('transcribeAudioFile called for:', audioData.filename);
     return new Promise((resolve, reject) => {
       if (!audioData.file) {
@@ -585,9 +592,10 @@ export function Transcription() {
 
       setTimeout(() => {
         try {
-          const transcription = simulateTranscription();
+          const full = simulateTranscription();
+          const summary = `Beschrijving: ${full.split('.').slice(0, 1).join('.').trim()}.`;
           console.log('Transcription generated successfully');
-          resolve(transcription);
+          resolve({ summary, full });
         } catch (error) {
           console.error('Error in transcription simulation:', error);
           reject(new Error("Kon audio niet transcriberen"));
@@ -863,6 +871,28 @@ export function Transcription() {
         )}
       </div>
 
+      {/* Transcript Display Mode */}
+      <div className="mb-6 flex flex-wrap items-center gap-2">
+        <span className="text-sm text-muted-foreground">Weergave:</span>
+        {[
+          { key: 'both', label: 'Beide' },
+          { key: 'description', label: 'Beschrijving' },
+          { key: 'full', label: 'Volledige tekst' },
+        ].map((option) => (
+          <button
+            key={option.key}
+            onClick={() => setTranscriptMode(option.key as any)}
+            className={`px-3 py-1 rounded text-xs transition ${
+              transcriptMode === option.key
+                ? 'bg-primary text-white'
+                : 'bg-muted/10 text-muted-foreground hover:bg-muted/20'
+            }`}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+
       {/* Audio Files List */}
       <div className="space-y-4">
         {audioFiles.map((audio) => (
@@ -888,6 +918,13 @@ export function Transcription() {
                   <span className="text-xs text-muted-foreground">
                     {formatDuration(audio.duration)}
                   </span>
+                  <button
+                    onClick={() => handleDeleteAudio(audio.id)}
+                    className="ml-auto size-6 text-muted-foreground hover:text-destructive transition-colors"
+                    title="Verwijder audio"
+                  >
+                    <Trash2 className="size-3" />
+                  </button>
                 </div>
                 <div className="text-xs text-muted-foreground mb-2">
                   Geüpload: {new Date(audio.uploadedAt).toLocaleString('nl-NL')}
@@ -909,7 +946,16 @@ export function Transcription() {
                 </div>
 
                 {/* Transcription */}
-                {audio.transcription && (
+                {(transcriptMode !== 'full' && audio.transcriptionSummary) && (
+                  <div className="space-y-2">
+                    <div className="text-sm font-medium">Beschrijving:</div>
+                    <div className="p-3 bg-muted/20 rounded text-sm leading-relaxed">
+                      {audio.transcriptionSummary}
+                    </div>
+                  </div>
+                )}
+
+                {(transcriptMode !== 'description' && (audio.transcription || editingId === audio.id)) && (
                   <div className="space-y-2">
                     <div className="flex items-center justify-between">
                       <span className="text-sm font-medium">Transcriptie:</span>
@@ -922,12 +968,6 @@ export function Transcription() {
                             <Edit3 className="size-3" />
                           </button>
                         )}
-                        <button
-                          onClick={() => handleDeleteAudio(audio.id)}
-                          className="size-6 text-muted-foreground hover:text-destructive transition-colors"
-                        >
-                          <Trash2 className="size-3" />
-                        </button>
                       </div>
                     </div>
 

@@ -85,7 +85,8 @@ export interface AudioData {
   filename: string;
   uploadedAt: string;
   duration?: number; // in seconds
-  transcription?: string;
+  transcription?: string; // Full verbatim transcript
+  transcriptionSummary?: string; // Short description / summary of the audio content
   transcriptionStatus: TranscriptionStatus;
   reviewedBy?: string;
   reviewedAt?: string;

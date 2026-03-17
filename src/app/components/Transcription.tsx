@@ -29,6 +29,8 @@ export function Transcription() {
   const [liveTranscription, setLiveTranscription] = useState("");
   const [transcriptMode, setTranscriptMode] = useState<'both' | 'description' | 'full'>('both');
   const [currentTranscribingId, setCurrentTranscribingId] = useState<string | null>(null);
+  const [typewriterText, setTypewriterText] = useState("");
+  const [isTyping, setIsTyping] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const recognitionRef = useRef<any>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -37,6 +39,7 @@ export function Transcription() {
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
   const liveTranscriptRef = useRef<string>("");
+  const typewriterTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Check if Web Speech API is available
   useEffect(() => {
@@ -70,6 +73,10 @@ export function Transcription() {
         audioElement.src = '';
       });
       audioElementsRef.current.clear();
+      // Clean up typewriter timeout
+      if (typewriterTimeoutRef.current) {
+        clearTimeout(typewriterTimeoutRef.current);
+      }
     };
   }, []);
 
@@ -373,41 +380,6 @@ export function Transcription() {
         ? { ...audio, transcriptionStatus: 'processing' as TranscriptionStatus }
         : audio
     ));
-
-    try {
-      console.log('Calling transcribeAudioFile for:', audio.filename);
-      const { summary, full } = await transcribeAudioFile(audio);
-      console.log('Transcription completed:', full.substring(0, 50) + '...');
-
-      setAudioFiles(prev => prev.map(audio =>
-        audio.id === id
-          ? {
-              ...audio,
-              transcriptionStatus: 'completed' as TranscriptionStatus,
-              transcriptionSummary: summary,
-              transcription: full,
-              reviewedAt: new Date().toISOString(),
-              reviewedBy: 'current_user'
-            }
-          : audio
-      ));
-
-      addSuccess(`Transcriptie van "${audio.filename}" is voltooid.`);
-    } catch (error) {
-      console.error('Transcription error:', error);
-      setAudioFiles(prev => prev.map(audio =>
-        audio.id === id
-          ? {
-              ...audio,
-              transcriptionStatus: 'failed' as TranscriptionStatus,
-              notes: `Transcriptie mislukt: ${error instanceof Error ? error.message : 'Onbekende fout'}.`
-            }
-          : audio
-      ));
-      addError(`Transcriptie van "${audio.filename}" is mislukt. Probeer het opnieuw.`);
-    } finally {
-      setCurrentTranscribingId(null);
-    }
   };
 
   const startTranscriptionForAudio = async (audio: AudioData) => {
@@ -431,13 +403,16 @@ export function Transcription() {
       const { summary, full } = await transcribeAudioFile(audio);
       console.log('Transcription completed:', full.substring(0, 50) + '...');
 
+      // Start typewriter effect for the full transcription
+      startTypewriterEffect(full, audio.id);
+
       setAudioFiles(prev => prev.map(a =>
         a.id === audio.id
           ? {
               ...a,
               transcriptionStatus: 'completed' as TranscriptionStatus,
               transcriptionSummary: summary,
-              transcription: full,
+              transcription: "", // Will be filled by typewriter effect
               reviewedAt: new Date().toISOString(),
               reviewedBy: 'current_user'
             }
@@ -457,8 +432,6 @@ export function Transcription() {
           : a
       ));
       addError(`Transcriptie van "${audio.filename}" is mislukt. Probeer het opnieuw.`);
-    } finally {
-      setCurrentTranscribingId(null);
     }
   };
 
@@ -518,6 +491,13 @@ export function Transcription() {
       audioElementsRef.current.delete(id);
     }
 
+    // Stop typewriter if it's for this audio
+    if (currentTranscribingId === id && typewriterTimeoutRef.current) {
+      clearTimeout(typewriterTimeoutRef.current);
+      setIsTyping(false);
+      setTypewriterText("");
+    }
+
     setAudioFiles((prev) => prev.filter((audio) => audio.id !== id));
   };
 
@@ -552,6 +532,32 @@ export function Transcription() {
     }, 3000);
   };
 
+  const startTypewriterEffect = (fullText: string, audioId: string) => {
+    setIsTyping(true);
+    setTypewriterText("");
+    setCurrentTranscribingId(audioId);
+    let index = 0;
+
+    const typeNextChar = () => {
+      if (index < fullText.length) {
+        setTypewriterText(fullText.slice(0, index + 1));
+        index++;
+        typewriterTimeoutRef.current = setTimeout(typeNextChar, 50); // 50ms per character
+      } else {
+        setIsTyping(false);
+        setCurrentTranscribingId(null);
+        // Update the actual audio file with the full text
+        setAudioFiles(prev => prev.map(audio =>
+          audio.id === audioId
+            ? { ...audio, transcription: fullText }
+            : audio
+        ));
+      }
+    };
+
+    typeNextChar();
+  };
+
   const transcribeAudioFile = async (audioData: AudioData): Promise<{ summary: string; full: string }> => {
     console.log('transcribeAudioFile called for:', audioData.filename);
     return new Promise((resolve, reject) => {
@@ -564,43 +570,56 @@ export function Transcription() {
       // For demo purposes, we'll simulate transcription with more realistic content
       // In a real implementation, this would use a proper speech-to-text service
 
-      const simulateTranscription = () => {
-        // Simulate different types of audio content based on filename
-        const filename = audioData.filename.toLowerCase();
-        console.log('Generating transcription for filename:', filename);
-
-        if (filename.includes('interview') || filename.includes('verhoor')) {
-          return "Goedemiddag, ik ben rechercheur Jansen. Kunt u mij vertellen wat er gisterenavond is gebeurd rond acht uur? Ik begrijp dat dit moeilijk voor u is, maar het is belangrijk dat we alle details krijgen.";
-        } else if (filename.includes('traffic') || filename.includes('verkeer')) {
-          return "Attentie alle weggebruikers. Er is een ongeval gebeurd op de A2 ter hoogte van knooppunt Deil. Er is sprake van een kettingbotsing met drie voertuigen. De rechterrijstrook is afgesloten. Verkeer wordt omgeleid via de parallelweg.";
-        } else if (filename.includes('phone') || filename.includes('telefoon')) {
-          return "Hallo, met de meldkamer. U belt vanwege een inbraak op de Lindenstraat 45? Kunt u mij vertellen wanneer dit heeft plaatsgevonden? Zijn er personen gewond geraakt? Blijft u alstublieft kalm, hulp is onderweg.";
-        } else {
-          // Generic transcription with some variation
-          const transcripts = [
-            "Dit is een opgenomen gesprek tussen twee personen. De eerste persoon vraagt naar de situatie en de tweede persoon geeft uitleg over wat er is gebeurd. Er wordt gesproken over belangrijke details die relevant zijn voor het onderzoek.",
-            "Opname van een gesprek waarin wordt gesproken over een incident. De spreker beschrijft de gebeurtenissen chronologisch en geeft belangrijke informatie over de betrokken partijen en de locatie van het voorval.",
-            "Geluidsopname waarin iemand verslag doet van een gebeurtenis. Er wordt gesproken over de tijdlijn, de betrokken personen en de omstandigheden waaronder het incident heeft plaatsgevonden."
-          ];
-          return transcripts[Math.floor(Math.random() * transcripts.length)];
-        }
-      };
-
       // Simulate processing time based on audio duration
       const processingTime = Math.max(2000, (audioData.duration || 60) * 100); // At least 2 seconds, or based on duration
       console.log('Processing time will be:', processingTime, 'ms');
 
       setTimeout(() => {
         try {
-          // Use the filename as a stand-in for the literal words spoken in the audio.
-          // This gives a deterministic 'word-for-word' style transcription based on the file name.
-          const baseName = audioData.filename
-            .replace(/\.[^/.]+$/, '') // remove extension
-            .replace(/[_-]+/g, ' ')   // underscores / hyphens to spaces
-            .trim();
+          // Simulate realistic speech-to-text transcription based on audio content type
+          const filename = audioData.filename.toLowerCase();
+          let fullTranscription = "";
+          let summaryText = "";
 
-          const full = `Transcriptie: ${baseName}`;
-          const summary = `Beschrijving: Het audio bestand bevat de tekst \"${baseName}\".`;
+          if (filename.includes('interview') || filename.includes('verhoor') || filename.includes('getuige')) {
+            const interviewTranscripts = [
+              "Goedemiddag, ik ben rechercheur Jansen van de politie. Kunt u mij vertellen wat er precies is gebeurd op de avond van de 15e? Ik begrijp dat dit moeilijk voor u is, maar het is belangrijk dat we alle details krijgen. Begin maar bij het begin.",
+              "Ik reed richting huis na mijn werk toen ik plotseling remlichten zag voor me. Ik probeerde uit te wijken maar het was te laat. Er was een harde klap en glas vloog door de lucht. Ik zag een gele auto die leek te slingeren over de weg.",
+              "Het was rond acht uur 's avonds. Ik stond bij het stoplicht te wachten toen ik een motor hoorde aankomen. Hij reed veel te hard en probeerde nog in te halen, maar sneed een andere auto af. Het volgende moment hoorde ik een enorme klap.",
+              "Ik was aan het joggen langs de weg toen ik het ongeluk zag gebeuren. Er waren vier voertuigen betrokken: een gele sedan, een bruine SUV, een zwarte motorfiets en een rode racefiets. Het leek alsof de motorrijder probeerde uit te wijken."
+            ];
+            fullTranscription = interviewTranscripts[Math.floor(Math.random() * interviewTranscripts.length)];
+            summaryText = "Getuigenverklaring over een verkeersongeval met meerdere voertuigen.";
+          } else if (filename.includes('traffic') || filename.includes('verkeer') || filename.includes('meldkamer')) {
+            const trafficTranscripts = [
+              "Attentie alle weggebruikers. Er is een ernstig verkeersongeval gebeurd op de A12 ter hoogte van kilometer 34.2 bij de afrit naar het zuiden. Er is sprake van een kettingbotsing met minimaal drie voertuigen. De rechterrijstrook is volledig afgesloten. Verkeer wordt omgeleid via de parallelweg. Houd rekening met extra reistijd van minimaal 30 minuten.",
+              "Meldkamer politie, wat is uw locatie? U belt vanwege een ongeval? Kunt u mij vertellen waar dit precies is gebeurd? Zijn er gewonden? Blijft u alstublieft kalm, hulp is al onderweg. Hoeveel voertuigen zijn er betrokken? Is er brand of lekkage?",
+              "Hier is de verkeersleiding. We hebben een melding van een voertuig dat van de weg is geraakt ter hoogte van de spoorwegovergang. Het betreft een personenauto die tegen een boom is gebotst. De bestuurder lijkt gewond te zijn. Ambulance en brandweer zijn ter plaatse."
+            ];
+            fullTranscription = trafficTranscripts[Math.floor(Math.random() * trafficTranscripts.length)];
+            summaryText = "Verkeersmelding over een ongeval met meerdere betrokken partijen.";
+          } else if (filename.includes('phone') || filename.includes('telefoon') || filename.includes('oproep')) {
+            const phoneTranscripts = [
+              "Hallo, met de meldkamer van de politie. U spreekt met centralist De Vries. Wat kan ik voor u doen? U wilt een melding maken? Kunt u mij vertellen wat er is gebeurd? Wanneer heeft dit plaatsgevonden? Waar precies?",
+              "Dag mevrouw, u belt over een inbraak in uw woning? Wanneer heeft u dit ontdekt? Is er iets gestolen? Heeft u de dader gezien? Zijn er sporen van braak? We sturen direct een surveillancewagen naar uw adres.",
+              "Goedemorgen, met de politie. U heeft net een melding gedaan over een verdachte situatie? Kunt u beschrijven wat u heeft gezien? Waar bevindt de persoon zich nu? Is er gevaar voor anderen? Blijf op afstand en houd ons op de hoogte."
+            ];
+            fullTranscription = phoneTranscripts[Math.floor(Math.random() * phoneTranscripts.length)];
+            summaryText = "Telefonische melding bij de politie over een incident.";
+          } else {
+            // Generic police/forensic audio content
+            const genericTranscripts = [
+              "Dit is een opgenomen verklaring. De persoon beschrijft hoe hij op de avond van het incident thuis was toen hij vreemde geluiden hoorde buiten. Hij keek uit het raam en zag twee personen bij de buren. Een van hen droeg een donkere hoodie en leek iets in zijn handen te hebben.",
+              "Opname van een gesprek tussen twee agenten ter plaatse. Ze bespreken de situatie: drie voertuigen betrokken bij een botsing, mogelijke alcohol invloed bij de bestuurder van de gele auto. Getuigen spreken over hoge snelheid en gevaarlijk rijgedrag.",
+              "Geluidsfragment van een arrestatie. De verdachte wordt zijn rechten voorgelezen: u heeft het recht om te zwijgen, alles wat u zegt kan tegen u gebruikt worden. Wilt u een advocaat spreken? Begrijpt u uw rechten?",
+              "Forensische opname van een plaats delict. Technici bespreken bevindingen: bandensporen wijzen op hoge snelheid, glasscherven verspreid over 20 meter, mogelijke olie lekkage van een van de voertuigen."
+            ];
+            fullTranscription = genericTranscripts[Math.floor(Math.random() * genericTranscripts.length)];
+            summaryText = "Politionele opname met relevante informatie over een zaak.";
+          }
+
+          const full = fullTranscription;
+          const summary = `Beschrijving: ${summaryText}`;
 
           console.log('Transcription generated successfully');
           resolve({ summary, full });
@@ -1006,7 +1025,10 @@ export function Transcription() {
                       </div>
                     ) : (
                       <div className="p-3 bg-muted/20 rounded text-sm leading-relaxed">
-                        {audio.transcription}
+                        {isTyping && currentTranscribingId === audio.id ? typewriterText : audio.transcription}
+                        {isTyping && currentTranscribingId === audio.id && (
+                          <span className="animate-pulse">|</span>
+                        )}
                       </div>
                     )}
 

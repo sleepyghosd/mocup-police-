@@ -1,0 +1,362 @@
+name: Integration Tests
+
+on:
+  pull_request:
+    branches: [development, main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  IMAGE_TAG: ${{ github.sha }}
+  LOCAL_REGISTRY: localhost:5000
+
+jobs:
+  # =============================================================================
+  # Stage 1: Detect Changed Directories
+  # =============================================================================
+  detect-changes:
+    name: Detect Changed Files
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.changes.outputs.backend }}
+      frontend: ${{ steps.changes.outputs.frontend }}
+      # Disabled services (kept for future use)
+      # chatbot: ${{ steps.changes.outputs.chatbot }}
+      # image-filtering: ${{ steps.changes.outputs.image-filtering }}
+      # transcription: ${{ steps.changes.outputs.transcription }}
+      semantic-search: ${{ steps.changes.outputs.semantic-search }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect file changes
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            backend:
+              - 'backend/**'
+              - 'docker-compose.test.yml'
+            frontend:
+              - 'frontend/**'
+            semantic-search:
+              - 'services/semantic-search/**'
+
+  # =============================================================================
+  # Stage 2: Lint & Unit Tests (Parallel)
+  # =============================================================================
+  backend-lint-test:
+    name: Backend - Lint & Unit Test
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.backend == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Restore dependencies
+        working-directory: ./backend
+        run: dotnet restore
+
+      - name: Check code formatting
+        working-directory: ./backend
+        run: dotnet format API.sln --verify-no-changes --verbosity diagnostic
+        continue-on-error: true
+
+      - name: Build
+        working-directory: ./backend
+        run: dotnet build --no-restore --configuration Release
+
+      - name: Run unit tests
+        working-directory: ./backend
+        run: |
+          dotnet test ./Tests/Tests.csproj \
+            --no-build \
+            --configuration Release \
+            --verbosity normal \
+            --logger "trx;LogFileName=test-results.trx" \
+            --collect:"XPlat Code Coverage" \
+            --results-directory ./TestResults
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: backend-test-results
+          path: ./backend/TestResults/
+
+  frontend-lint-test:
+    name: Frontend - Lint & Unit (not implemented) Test
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.frontend == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ./frontend
+        run: npm ci
+
+      - name: Lint - ESLint
+        working-directory: ./frontend
+        run: npm run lint
+
+      - name: Lint - Prettier check
+        working-directory: ./frontend
+        run: npm run format:check
+        continue-on-error: true
+
+      # disabled build application because nothing is being pushed or unit tested
+      # - name: Build application
+      #   working-directory: ./frontend
+      #   run: npm run vite:build:app
+      #   env:
+      #     CI: true
+
+
+  # Disabled for now - kept for future implementation
+  # chatbot-lint-test:
+  #   name: Chatbot - Lint & Test
+  #   runs-on: ubuntu-latest
+  #   needs: detect-changes
+  #   if: needs.detect-changes.outputs.chatbot == 'true'
+  #   steps: ...
+
+  # Disabled for now - kept for future implementation
+  # image-filtering-lint-test:
+  #   name: Image Filtering - Lint & Test
+  #   runs-on: ubuntu-latest
+  #   needs: detect-changes
+  #   if: needs.detect-changes.outputs.image-filtering == 'true'
+  #   steps: ...
+
+  # Disabled for now - kept for future implementation
+  # transcription-lint-test:
+  #   name: Transcription - Lint & Test
+  #   runs-on: ubuntu-latest
+  #   needs: detect-changes
+  #   if: needs.detect-changes.outputs.transcription == 'true'
+  #   steps: ...
+
+  semantic-search-lint-test:
+    name: Semantic Search - Lint & Test (Disabled)
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: false  # Disabled for this stage of the project
+    # if: needs.detect-changes.outputs.semantic-search == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        working-directory: ./services/semantic-search
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8 pytest pytest-cov
+          pip install -r requirements.txt
+
+      - name: Lint with flake8
+        working-directory: ./services/semantic-search
+        run: flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        continue-on-error: true
+
+      - name: Run tests
+        working-directory: ./services/semantic-search
+        run: pytest --cov=. --cov-report=xml || echo "No tests found"
+        continue-on-error: true
+
+  # =============================================================================
+  # Stage 3: Build Docker Images & Push to Local Registry (Self-Hosted)
+  # =============================================================================
+  build-and-push:
+    name: Build & Push Docker Images
+    runs-on: self-hosted
+    needs: [detect-changes, backend-lint-test, frontend-lint-test]
+    if: |
+      always() &&
+      !cancelled() &&
+      (needs.backend-lint-test.result == 'success' || needs.backend-lint-test.result == 'skipped') &&
+      (needs.frontend-lint-test.result == 'success' || needs.frontend-lint-test.result == 'skipped')
+    outputs:
+      backend-built: ${{ steps.build-backend.outcome == 'success' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Verify Docker environment
+        run: |
+          echo "Docker version:"
+          docker --version
+          echo "Docker Compose version:"
+          docker compose version
+          echo "Checking local registry..."
+          curl -f ${{ env.LOCAL_REGISTRY }}/v2/_catalog || echo "Warning: Local registry not responding"
+
+      # Backend
+      - name: Build Backend Docker image
+        id: build-backend
+        if: needs.detect-changes.outputs.backend == 'true'
+        run: |
+          docker build -t ${{ env.LOCAL_REGISTRY }}/pv-designer-backend:${{ env.IMAGE_TAG }} \
+            -t ${{ env.LOCAL_REGISTRY }}/pv-designer-backend:latest \
+            -f ./backend/API/Dockerfile ./backend
+          echo "Backend image built successfully"
+
+      - name: Push Backend to local registry
+        if: steps.build-backend.outcome == 'success'
+        run: |
+          docker push ${{ env.LOCAL_REGISTRY }}/pv-designer-backend:${{ env.IMAGE_TAG }}
+          docker push ${{ env.LOCAL_REGISTRY }}/pv-designer-backend:latest
+          echo "Backend pushed to local registry"
+
+      # Disabled services - kept for future implementation
+      # Chatbot, Image Filtering, Transcription build steps removed
+
+      # Semantic Search (Disabled for now)
+      # - name: Build Semantic Search Docker image
+      #   id: build-semantic-search
+      #   if: false  # Disabled for this stage
+      #   run: |
+      #     docker build -t ${{ env.LOCAL_REGISTRY }}/pv-designer-semantic-search:${{ env.IMAGE_TAG }} \
+      #       -t ${{ env.LOCAL_REGISTRY }}/pv-designer-semantic-search:latest \
+      #       ./services/semantic-search
+
+      - name: Docker logout
+        if: steps.build-backend.outcome == 'success'
+        run: docker logout
+  # =============================================================================
+  # Stage 4: Integration Tests (Self-Hosted)
+  # =============================================================================
+  integration-tests:
+    name: Run Integration Tests
+    runs-on: self-hosted
+    needs: [detect-changes, build-and-push]
+    if: always() && needs.build-and-push.result == 'success' &&
+     needs.detect-changes.outputs.backend == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Restore .NET dependencies
+        working-directory: ./backend
+        run: dotnet restore 
+
+      - name: Run Backend Integration Tests
+        working-directory: ./backend
+        id: backend-integration
+        if: needs.detect-changes.outputs.backend == 'true'
+        run: |
+          echo "Running backend integration tests..."
+
+          dotnet test ./IntegrationTests/IntegrationTests.csproj \
+            --configuration Release \
+            --verbosity normal \
+            --logger "trx;LogFileName=integration-results.trx" \
+            --results-directory ./integration-results \
+            -p:TreatWarningsAsErrors=false 
+
+          echo "Backend integration tests completed"
+
+      - name: Upload test artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-test-results
+          path: |
+            ./integration-results/
+
+
+  # =============================================================================
+  # Stage 5: Report Results
+  # =============================================================================
+  report:
+    name: Report Test Results
+    runs-on: ubuntu-latest
+    needs: [integration-tests]
+    if: always()
+    steps:
+      - name: Download test artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+        continue-on-error: true
+
+      - name: Generate Test Summary
+        run: |
+          echo "## Integration Test Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Component | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Integration Tests | ${{ needs.integration-tests.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Triggered by:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const status = '${{ needs.integration-tests.result }}';
+            const emoji = status === 'success' ? ':white_check_mark:' : ':x:';
+
+            const body = `## ${emoji} Integration Test Results
+
+            | Component | Status |
+            |-----------|--------|
+            | Integration Tests | ${status} |
+
+            **Commit:** \`${{ github.sha }}\`
+            **Branch:** \`${{ github.head_ref }}\`
+
+            [View workflow run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            `;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+  # =============================================================================
+  # Stage 6: Notify on Failure
+  # =============================================================================
+  notify-failure:
+    name: Notify on Failure
+    runs-on: ubuntu-latest
+    needs: [backend-lint-test, frontend-lint-test, build-and-push, integration-tests]
+    if: |
+      always() &&
+      (needs.backend-lint-test.result == 'failure' ||
+       needs.frontend-lint-test.result == 'failure' ||
+       needs.build-and-push.result == 'failure' ||
+       needs.integration-tests.result == 'failure')
+    steps:
+      - name: Send failure notification
+        run: |
+          echo "Pipeline failed!"
+          echo "Backend Lint/Test: ${{ needs.backend-lint-test.result }}"
+          echo "Frontend Lint/Test: ${{ needs.frontend-lint-test.result }}"
+          echo "Build & Push: ${{ needs.build-and-push.result }}"
+          echo "Integration Tests: ${{ needs.integration-tests.result }}"
+
+          # Add email notification here if needed

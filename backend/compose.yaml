@@ -1,0 +1,31 @@
+﻿services:
+  api:
+    image: api
+    ports:
+      - 9000:8080
+    build:
+      context: .
+      dockerfile: API/Dockerfile
+    environment:
+      - cdnHost=http://145.93.106.61:8080
+      - sftpHost=145.93.106.61
+      - sftpPort=2222
+      - sftpUsername=ftpuser
+      - sftpPassword=ftpuser321!
+    depends_on:
+      - sftp
+
+  sftp:
+    image: atmoz/sftp
+    container_name: sftp
+    ports:
+      - "2222:22"
+    command: ftpuser:ftpuser321!:1001
+    # This creates:
+    # user = ftpuser
+    # pass = ftpuser321!
+    # home folder = /home/ftpuser/files
+    # parent of upload is writable
+    volumes:
+      - ./sftp-data:/home/ftpuser/files
+    restart: unless-stopped

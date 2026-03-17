@@ -1,0 +1,88 @@
+name: Backend CI
+
+on:
+  push:
+    branches-ignore:
+      - main
+      - development
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backendCI.yml'
+  pull_request:
+    branches-ignore:
+      - main
+      - development
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backendCI.yml'
+
+jobs:
+  backend-ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      
+      - name: Restore dependencies
+        working-directory: ./backend
+        run: dotnet restore
+      
+      - name: Check code formatting (Lint)
+        working-directory: ./backend
+        run: dotnet format API.sln --verify-no-changes --verbosity diagnostic
+        continue-on-error: false
+
+      - name: Build
+        working-directory: ./backend
+        run: dotnet build --no-restore --configuration Release -warnaserror
+
+      
+      - name: Run unit tests
+        working-directory: ./backend
+        run: |
+          dotnet test \
+            --no-build \
+            --configuration Release \
+            --verbosity normal \
+            --logger "trx;LogFileName=test-results.trx" \
+            --collect:"XPlat Code Coverage" \
+            --results-directory ./TestResults
+
+      - name: Verify tests were run
+        working-directory: ./backend
+        run: |
+          if [ ! -f TestResults/test-results.trx ]; then
+            echo "❌ ERROR: No test results found!"
+            echo "Please ensure you have unit tests in your project."
+            exit 1
+          fi
+          
+          # Check if any tests were executed
+          TEST_COUNT=$(grep -o 'total="[0-9]*"' TestResults/test-results.trx | grep -o '[0-9]*' || echo "0")
+          
+          if [ "$TEST_COUNT" -eq 0 ]; then
+            echo "❌ ERROR: No unit tests were executed!"
+            echo "Test count: $TEST_COUNT"
+            echo "Please add unit tests to your project."
+            exit 1
+          fi
+          
+          echo "✅ SUCCESS: $TEST_COUNT test(s) executed"
+            
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: false
+          tags: pvd-backend:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

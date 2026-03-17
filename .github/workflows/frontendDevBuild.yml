@@ -1,0 +1,46 @@
+name: Frontend Dev Build
+on:
+  push:
+    branches: [ development ]
+    paths:
+      - frontend/**
+      - '.github/workflows/frontendDevBuild.yml'
+
+jobs:
+  export:
+    name: Build electron application
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+      - name: Install dependencies
+        run: npm install
+        working-directory: ./frontend/
+      - name: Install dev dependencies
+        run: npm install --only=dev
+        working-directory: ./frontend/
+      - name: Build application
+        run: npm run make
+        working-directory: ./frontend/      
+      - name: ZIP Output
+        run: powershell Compress-Archive ./frontend-win32-x64/ ./develop-${{ github.run_id }}.zip
+        working-directory: ./frontend/out/
+      - name: Release Dev Build
+        uses: ncipollo/release-action@v1.20.0
+        with:
+          tag: dev-${{ github.run_number }}
+          name: "Dev Build #${{ github.run_number }}"
+          body: |
+            Development build from commit ${{ github.sha }}
+            
+            **Author:** @${{ github.actor }}
+            **Branch:** ${{ github.ref_name }}
+          artifacts: "./frontend/out/develop-${{ github.run_id }}.zip"
+          prerelease: true
+          allowUpdates: true
+          removeArtifacts: true
+          immutableCreate: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+        

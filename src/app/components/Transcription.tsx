@@ -13,6 +13,7 @@ import {
   Save,
   X,
   Mic,
+  Trash2,
 } from "lucide-react";
 
 export function Transcription() {
@@ -31,6 +32,10 @@ export function Transcription() {
   const recognitionRef = useRef<any>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioElementsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
+  const liveTranscriptRef = useRef<string>("");
 
   // Check if Web Speech API is available
   useEffect(() => {
@@ -49,6 +54,12 @@ export function Transcription() {
       if (recognitionRef.current) {
         recognitionRef.current.stop();
       }
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.stop();
+      }
+      if (mediaStreamRef.current) {
+        mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+      }
       if (audioContextRef.current) {
         audioContextRef.current.close();
       }
@@ -61,51 +72,131 @@ export function Transcription() {
     };
   }, []);
 
-  const startLiveTranscription = () => {
-    if (!recognitionRef.current) {
-      addError("Spraakherkenning wordt niet ondersteund in deze browser.");
-      return;
-    }
+  const isRecordingSupported = isSpeechRecognitionAvailable ||
+    (typeof navigator !== 'undefined' &&
+      !!navigator.mediaDevices?.getUserMedia &&
+      typeof MediaRecorder !== 'undefined');
 
+  const startLiveTranscription = async () => {
     if (isRecording) {
       stopLiveTranscription();
       return;
     }
 
+    const canSpeech = Boolean(recognitionRef.current);
+    const canRecord = typeof navigator !== 'undefined' &&
+      !!navigator.mediaDevices?.getUserMedia &&
+      typeof MediaRecorder !== 'undefined';
+
+    if (!canSpeech && !canRecord) {
+      addError(
+        "Spraakherkenning en microfoonopname worden niet ondersteund in deze browser. Gebruik Chrome, Edge of Safari."
+      );
+      return;
+    }
+
     setIsRecording(true);
     setLiveTranscription("");
+    liveTranscriptRef.current = "";
+    recordedChunksRef.current = [];
 
-    recognitionRef.current.onstart = () => {
-      addSuccess("Spraakherkenning gestart. Begin met spreken.");
-    };
+    if (canSpeech) {
+      recognitionRef.current.onstart = () => {
+        addSuccess("Spraakherkenning gestart. Begin met spreken.");
+      };
 
-    recognitionRef.current.onresult = (event: any) => {
-      const transcript = Array.from(event.results)
-        .map((result: any) => result[0].transcript)
-        .join('');
+      recognitionRef.current.onresult = (event: any) => {
+        const transcript = Array.from(event.results)
+          .map((result: any) => result[0].transcript)
+          .join('');
 
-      setLiveTranscription(transcript);
-    };
+        liveTranscriptRef.current = transcript;
+        setLiveTranscription(transcript);
+      };
 
-    recognitionRef.current.onerror = (event: any) => {
-      console.error('Speech recognition error:', event.error);
-      addError(`Spraakherkenning fout: ${event.error}`);
-      setIsRecording(false);
-    };
+      recognitionRef.current.onerror = (event: any) => {
+        console.error('Speech recognition error:', event.error);
+        addError(`Spraakherkenning fout: ${event.error}`);
+        setIsRecording(false);
+      };
 
-    recognitionRef.current.onend = () => {
-      setIsRecording(false);
-      if (liveTranscription.trim()) {
-        addSuccess("Spraakherkenning voltooid.");
+      recognitionRef.current.onend = () => {
+        setIsRecording(false);
+        if (liveTranscriptRef.current.trim()) {
+          addSuccess("Spraakherkenning voltooid.");
+        }
+      };
+
+      try {
+        recognitionRef.current.start();
+      } catch (error) {
+        console.error('Failed to start speech recognition:', error);
+        addError("Kon spraakherkenning niet starten.");
+        setIsRecording(false);
       }
-    };
+    } else {
+      addSuccess("Spraakherkenning is niet beschikbaar; opname wordt wel gemaakt.");
+    }
 
-    try {
-      recognitionRef.current.start();
-    } catch (error) {
-      console.error('Failed to start speech recognition:', error);
-      addError("Kon spraakherkenning niet starten.");
-      setIsRecording(false);
+    if (canRecord) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaStreamRef.current = stream;
+
+        const mimeType =
+          MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+            ? 'audio/webm;codecs=opus'
+            : MediaRecorder.isTypeSupported('audio/webm')
+            ? 'audio/webm'
+            : 'audio/ogg';
+
+        const recorder = new MediaRecorder(stream, { mimeType });
+        mediaRecorderRef.current = recorder;
+
+        recorder.ondataavailable = (event: BlobEvent) => {
+          if (event.data && event.data.size > 0) {
+            recordedChunksRef.current.push(event.data);
+          }
+        };
+
+        recorder.onstop = () => {
+          const chunks = recordedChunksRef.current;
+          if (!chunks.length) {
+            return;
+          }
+
+          const blob = new Blob(chunks, { type: mimeType });
+          const fileName = `Opname ${new Date().toLocaleString('nl-NL')}.webm`;
+          const file = new File([blob], fileName, { type: mimeType });
+
+          const newAudio: AudioData = {
+            id: `opname_${Date.now()}`,
+            filename: fileName,
+            uploadedAt: new Date().toISOString(),
+            transcriptionStatus: 'pending',
+            file,
+          };
+
+          setAudioFiles((prev) => [newAudio, ...prev]);
+          addSuccess("Opname is opgeslagen. Transcriptie wordt gestart.");
+          startTranscriptionForAudio(newAudio);
+
+          recordedChunksRef.current = [];
+          setIsRecording(false);
+
+          if (mediaStreamRef.current) {
+            mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+            mediaStreamRef.current = null;
+          }
+          mediaRecorderRef.current = null;
+        };
+
+        recorder.start();
+      } catch (error) {
+        console.error('Microphone recording error:', error);
+        addError("Kon microfoonopname niet starten. Controleer je machtigingen.");
+        setIsRecording(false);
+      }
     }
   };
 
@@ -113,6 +204,16 @@ export function Transcription() {
     if (recognitionRef.current && isRecording) {
       recognitionRef.current.stop();
     }
+
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
+
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+      mediaStreamRef.current = null;
+    }
+
     setIsRecording(false);
   };
 
@@ -389,6 +490,28 @@ export function Transcription() {
   const handleCancelEdit = () => {
     setEditingId(null);
     setEditText("");
+  };
+
+  const handleDeleteAudio = (id: string) => {
+    // Stop playback if this is the currently playing file
+    if (playingId === id) {
+      const audioElement = audioElementsRef.current.get(id);
+      if (audioElement) {
+        audioElement.pause();
+        audioElement.currentTime = 0;
+      }
+      setPlayingId(null);
+    }
+
+    // Clean up any stored audio element
+    const element = audioElementsRef.current.get(id);
+    if (element) {
+      element.pause();
+      element.src = '';
+      audioElementsRef.current.delete(id);
+    }
+
+    setAudioFiles((prev) => prev.filter((audio) => audio.id !== id));
   };
 
   const formatDuration = (seconds?: number) => {
@@ -695,7 +818,7 @@ export function Transcription() {
           </div>
           <button
             onClick={startLiveTranscription}
-            disabled={!isSpeechRecognitionAvailable}
+            disabled={!isRecordingSupported}
             className={`px-4 py-2 rounded-lg font-medium transition-colors flex items-center gap-2 ${
               isRecording
                 ? 'bg-destructive text-white hover:bg-destructive/90'
@@ -721,7 +844,10 @@ export function Transcription() {
                 Opslaan als Bestand
               </button>
               <button
-                onClick={() => setLiveTranscription("")}
+                onClick={() => {
+                  setLiveTranscription("");
+                  liveTranscriptRef.current = "";
+                }}
                 className="px-3 py-1 bg-muted-foreground text-white text-sm rounded hover:bg-muted-foreground/90 transition-colors"
               >
                 Wissen
@@ -730,9 +856,9 @@ export function Transcription() {
           </div>
         )}
 
-        {!isSpeechRecognitionAvailable && (
+        {!isRecordingSupported && (
           <div className="p-3 bg-warning/10 border border-warning/20 rounded text-warning text-sm">
-            ⚠️ Live spraakherkenning wordt niet ondersteund in deze browser. Gebruik Chrome, Edge of Safari voor deze functie.
+            ⚠️ Live opname en spraakherkenning worden niet ondersteund in deze browser. Gebruik Chrome, Edge of Safari voor deze functie.
           </div>
         )}
       </div>
@@ -787,14 +913,22 @@ export function Transcription() {
                   <div className="space-y-2">
                     <div className="flex items-center justify-between">
                       <span className="text-sm font-medium">Transcriptie:</span>
-                      {editingId !== audio.id && (
+                      <div className="flex items-center gap-2">
+                        {editingId !== audio.id && (
+                          <button
+                            onClick={() => handleEditTranscription(audio)}
+                            className="size-6 text-muted-foreground hover:text-primary transition-colors"
+                          >
+                            <Edit3 className="size-3" />
+                          </button>
+                        )}
                         <button
-                          onClick={() => handleEditTranscription(audio)}
-                          className="size-6 text-muted-foreground hover:text-primary transition-colors"
+                          onClick={() => handleDeleteAudio(audio.id)}
+                          className="size-6 text-muted-foreground hover:text-destructive transition-colors"
                         >
-                          <Edit3 className="size-3" />
+                          <Trash2 className="size-3" />
                         </button>
-                      )}
+                      </div>
                     </div>
 
                     {editingId === audio.id ? (
